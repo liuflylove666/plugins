@@ -304,12 +304,19 @@ func restoreBackup(ifName, containerID, backupPath string) error {
 }
 
 func cmdAdd(args *skel.CmdArgs) error {
+	if err := validateSysctlConflictingKeys(args.StdinData); err != nil {
+		return err
+	}
 	tuningConf, err := parseConf(args.StdinData, args.Args)
 	if err != nil {
 		return err
 	}
 
 	if err = validateSysctlConf(tuningConf); err != nil {
+		return err
+	}
+
+	if err = validateArgs(args); err != nil {
 		return err
 	}
 
@@ -327,12 +334,14 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	err = ns.WithNetNSPath(args.Netns, func(_ ns.NetNS) error {
 		for key, value := range tuningConf.SysCtl {
+			key = strings.Replace(key, ".", string(os.PathSeparator), -1)
+
 			// If the key contains `IFNAME` - substitute it with args.IfName
 			// to allow setting sysctls on a particular interface, on which
 			// other operations (like mac/mtu setting) are performed
 			key = strings.Replace(key, "IFNAME", args.IfName, 1)
 
-			fileName := filepath.Join("/proc/sys", strings.Replace(key, ".", "/", -1))
+			fileName := filepath.Join("/proc/sys", key)
 
 			// Refuse to modify sysctl parameters that don't belong
 			// to the network subsystem.
@@ -405,6 +414,9 @@ func main() {
 }
 
 func cmdCheck(args *skel.CmdArgs) error {
+	if err := validateSysctlConflictingKeys(args.StdinData); err != nil {
+		return err
+	}
 	tuningConf, err := parseConf(args.StdinData, args.Args)
 	if err != nil {
 		return err
@@ -541,4 +553,33 @@ func readAllowlist() (bool, []string, error) {
 		}
 	}
 	return true, allowList, nil
+}
+
+type sysctlKey string
+
+type sysctlCheck struct {
+	SysCtl map[sysctlKey]string `json:"sysctl"`
+}
+
+var sysctlDuplicatesMap = map[sysctlKey]interface{}{}
+
+func (d *sysctlKey) UnmarshalText(data []byte) error {
+	key := sysctlKey(string(data))
+	if _, exists := sysctlDuplicatesMap[key]; exists {
+		return errors.New("duplicated sysctl keys are not allowed")
+	}
+	sysctlDuplicatesMap[key] = ""
+	return nil
+}
+
+func validateSysctlConflictingKeys(data []byte) error {
+	sysctlCheck := sysctlCheck{}
+	return json.Unmarshal(data, &sysctlCheck)
+}
+
+func validateArgs(args *skel.CmdArgs) error {
+	if strings.Contains(args.Args, string(os.PathSeparator)) {
+		return errors.New(fmt.Sprintf("Interface name contains an invalid character %s", string(os.PathSeparator)))
+	}
+	return nil
 }
